@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""DBF v3 to CSV converter with XML-configurable logging."""
+
+import argparse
+import csv
+import logging
+import logging.handlers
+import os
+import struct
+import sys
+import xml.etree.ElementTree as ET
+
+
+# Custom TRACE level
+TRACE_LEVEL_NUM = 5
+logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+# Map additional level names to match specification
+logging.addLevelName(logging.CRITICAL, "FATAL")
+logging.addLevelName(logging.WARNING, "WARN")
+
+def trace(self, message, *args, **kws):
+    if self.isEnabledFor(TRACE_LEVEL_NUM):
+        self._log(TRACE_LEVEL_NUM, message, args, **kws)
+logging.Logger.trace = trace
+
+
+def configure_logging(xml_path: str):
+    """Configure logging using an XML configuration file."""
+    default_level = "INFO"
+    default_format = "%(asctime)s - %(levelname)s - %(message)s"
+    default_filename = "converte_python.log"
+    default_max_bytes = 1048576
+    default_backup_count = 3
+
+    if not os.path.exists(xml_path):
+        logging.basicConfig(level=default_level, format=default_format)
+        logging.getLogger().warning(
+            "Arquivo de configuracao de log '%s' nao encontrado. Usando configuracao padrao.",
+            xml_path,
+        )
+        return
+
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+
+        level = root.findtext("level", default_level)
+        fmt = root.findtext("format", default_format)
+        filename = root.findtext("filename", default_filename)
+        max_bytes = int(root.findtext("maxBytes", str(default_max_bytes)))
+        backup_count = int(root.findtext("backupCount", str(default_backup_count)))
+
+    except Exception as exc:  # noqa: BLE001
+        logging.basicConfig(level=default_level, format=default_format)
+        logging.getLogger().error("Falha ao ler configuracao de log: %s", exc)
+        return
+
+    level_num = getattr(logging, level.upper(), logging.INFO)
+
+    logger = logging.getLogger()
+    logger.setLevel(level_num)
+
+    formatter = logging.Formatter(fmt)
+
+    # Rotating file handler
+    file_handler = logging.handlers.RotatingFileHandler(
+        filename, maxBytes=max_bytes, backupCount=backup_count
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+
+def parse_dbf_header(fp):
+    """Parse DBF header returning field metadata and record count."""
+    header = fp.read(32)
+    if len(header) < 32:
+        raise ValueError("Arquivo DBF invalido ou corrompido")
+
+    num_records = struct.unpack("<I", header[4:8])[0]
+    header_length = struct.unpack("<H", header[8:10])[0]
+
+    fields = []
+    while True:
+        field_desc = fp.read(32)
+        if not field_desc or field_desc[0] == 0x0D:
+            break
+        name = field_desc[:11].split(b"\x00", 1)[0].decode("latin-1")
+        field_type = field_desc[11:12].decode("latin-1")
+        length = field_desc[16]
+        decimal = field_desc[17]
+        fields.append({
+            "name": name,
+            "type": field_type,
+            "length": length,
+            "decimal": decimal,
+        })
+
+    # Position file pointer to start of records
+    fp.seek(header_length)
+    return fields, num_records
+
+
+def read_dbf_records(fp, fields, num_records):
+    """Read DBF records returning list of records."""
+    records = []
+    record_size = sum(field["length"] for field in fields) + 1  # + deletion flag
+
+    for _ in range(num_records):
+        data = fp.read(record_size)
+        if not data:
+            break
+        if data[0:1] == b"*":
+            continue  # registro deletado
+        pos = 1
+        record = []
+        for field in fields:
+            raw = data[pos : pos + field["length"]]
+            pos += field["length"]
+            value = raw.decode("latin-1").strip()
+            record.append(value)
+        records.append(record)
+    return records
+
+
+def dbf_to_csv(input_file: str, output_file: str):
+    """Convert DBF file to CSV preserving field names."""
+    logging.info("Lendo arquivo DBF: %s", input_file)
+    if not os.path.exists(input_file):
+        logging.error("Arquivo de entrada nao encontrado: %s", input_file)
+        raise FileNotFoundError(input_file)
+
+    try:
+        with open(input_file, "rb") as fp:
+            fields, num_records = parse_dbf_header(fp)
+            logging.debug(
+                "Layout lido: %s",
+                [
+                    (
+                        f["name"],
+                        f["type"],
+                        f["length"],
+                        f["decimal"],
+                    )
+                    for f in fields
+                ],
+            )
+            logging.debug("Quantidade de registros: %d", num_records)
+            records = read_dbf_records(fp, fields, num_records)
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("Erro ao ler arquivo DBF: %s", exc)
+        raise
+
+    logging.info("Escrevendo CSV: %s", output_file)
+    try:
+        with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([f["name"] for f in fields])
+            for record in records:
+                writer.writerow(record)
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("Erro ao escrever CSV: %s", exc)
+        raise
+    logging.info("Conversao concluida. %d registros processados.", len(records))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Converte DBF v3 para CSV")
+    parser.add_argument("entrada", help="Arquivo DBF de entrada")
+    parser.add_argument("saida", help="Arquivo CSV de saida")
+    parser.add_argument(
+        "--log-config",
+        default="logging_config.xml",
+        help="Arquivo XML de configuracao de log",
+    )
+    args = parser.parse_args(argv)
+
+    configure_logging(args.log_config)
+
+    try:
+        dbf_to_csv(args.entrada, args.saida)
+    except Exception as exc:  # noqa: BLE001
+        logging.critical("Erro fatal: %s", exc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
