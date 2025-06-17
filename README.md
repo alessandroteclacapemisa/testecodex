@@ -1,12 +1,18 @@
 # Conversor DBF para CSV
 
-Este repositório contém o script **converte_python** para converter arquivos
-DBF (versão 3) para arquivos CSV.
+Este repositório contém os scripts **converte_python** e **converte_powershell.ps1**
+para converter arquivos DBF (versão 3) para arquivos CSV.
 
 ## Uso
 
+### Python
 ```
 ./converte_python entrada.dbf saida.csv
+```
+
+### PowerShell
+```
+pwsh ./converte_powershell.ps1 -Entrada entrada.dbf -Saida saida.csv
 ```
 
 É possível especificar um arquivo XML para configuração de logs usando o
