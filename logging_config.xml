@@ -1,0 +1,7 @@
+<logging>
+    <level>INFO</level>
+    <format>%(asctime)s - %(levelname)s - %(message)s</format>
+    <filename>converte_python.log</filename>
+    <maxBytes>1048576</maxBytes>
+    <backupCount>3</backupCount>
+</logging>
